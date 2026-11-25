@@ -1,88 +1,60 @@
-# ChatGPT Clone – React + FastAPI + Groq
+# Personal AI Assistant – React + FastAPI + Groq
 
-A ChatGPT-style chat UI connected to your **FastAPI + Groq** backend.
+ChatGPT-style chat UI on a FastAPI backend that calls the Groq API (streaming replies, per-browser conversation memory).
 
----
-
-## Quick start (recommended – no build)
-
-### 1. Backend
+## 1. Backend
 
 ```bash
-# From project root
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env
-# Edit .env and set GROQ_API_KEY=gsk_your_key
-# Get a free key: https://console.groq.com/keys
+copy .env.example .env          # macOS/Linux: cp .env.example .env
+# edit .env -> GROQ_API_KEY=gsk_...   (free key: https://console.groq.com/keys)
 
 uvicorn main:app --reload
-# Server: http://127.0.0.1:8000
 ```
 
-### 2. Frontend (standalone – zero install)
+Check it: http://127.0.0.1:8000/health should show `"api_key_configured": true`.
+Interactive docs: http://127.0.0.1:8000/docs
 
-```bash
-cd frontend
-# Option A: open the file
-#   open index.html   (macOS)  or  double-click index.html
+## 2. Frontend (pick one)
 
-# Option B: serve with Python (avoids some browser CORS quirks with file://)
-python -m http.server 5500
-# Then open: http://127.0.0.1:5500
-```
-
-Chat at **http://127.0.0.1:5500** (or open `frontend/index.html` directly).
-
----
-
-## Features
-
-- ChatGPT-inspired dark theme
-- Sidebar with conversation snippets
-- New chat / Clear conversation
-- Suggestion chips on empty state
-- Typing indicator
-- Enter to send · Shift+Enter for newline
-- Mobile-responsive sidebar
-- Works with your existing Groq-backed `/chat` API
-
----
-
-## API
-
-| Method | Endpoint   | Description              |
-|--------|------------|--------------------------|
-| POST   | `/chat`    | Send message → get reply |
-| GET    | `/history` | View history             |
-| DELETE | `/history` | Clear history            |
-
-To point the UI at a different backend, edit `API_BASE` near the top of `frontend/index.html`.
-
----
-
-## Vite + TypeScript version (optional)
-
-A full Vite React TypeScript scaffold also lives under `frontend/` (`src/App.tsx`, etc.).
-
+**Vite + React + TypeScript (main UI, streaming)**
 ```bash
 cd frontend
 npm install
-npm run dev
-# → http://localhost:5173
+npm run dev        # http://localhost:5173
+```
+Different backend URL? Set `VITE_API_URL` (e.g. in `frontend/.env`).
+
+**Zero-install version** – serve `frontend/standalone.html`:
+```bash
+cd frontend
+python -m http.server 5500     # open http://127.0.0.1:5500/standalone.html
 ```
 
-If `npm install` is slow in your environment, use the standalone `index.html` above instead.
+## Models / tuning
 
----
+`llama-3.1-8b-instant` and `llama-3.3-70b-versatile` were **retired by Groq on 2026-08-16**.
+Defaults are now `openai/gpt-oss-20b` (fast) – switch to `openai/gpt-oss-120b` for harder questions.
+Everything is configurable in `.env` (see `.env.example`): `GROQ_MODEL`, `REASONING_EFFORT`
+(`low`/`medium`/`high`), `TEMPERATURE`, `MAX_TOKENS`, `MAX_HISTORY`, `SYSTEM_PROMPT`, `CORS_ORIGINS`.
+Current model list: https://console.groq.com/docs/models
 
-## Change model
+## API
 
-In `main.py`:
+| Method | Endpoint       | Description                                   |
+|--------|----------------|-----------------------------------------------|
+| POST   | `/chat`        | `{message, session_id?}` → `{reply, model}`   |
+| POST   | `/chat/stream` | Same, streamed as Server-Sent Events          |
+| GET    | `/history`     | `?session_id=` conversation so far            |
+| DELETE | `/history`     | `?session_id=` clear that conversation        |
+| GET    | `/health`      | Status, model, whether a key is configured    |
 
-```python
-MODEL = "llama-3.1-8b-instant"       # fast (default)
-# MODEL = "llama-3.3-70b-versatile"  # smarter
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q          # offline – Groq is faked, no key needed
 ```

@@ -1,7 +1,25 @@
-import { useState, useRef, useEffect, useCallback, FormEvent, KeyboardEvent } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import type { FormEvent, KeyboardEvent } from 'react'
 import './index.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
+function newSessionId(): string {
+  return crypto.randomUUID ? crypto.randomUUID() : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+// Each browser keeps its own conversation on the server (survives page reloads).
+function loadSessionId(): string {
+  try {
+    const saved = localStorage.getItem('chat_session')
+    if (saved) return saved
+    const id = newSessionId()
+    localStorage.setItem('chat_session', id)
+    return id
+  } catch {
+    return newSessionId()
+  }
+}
 
 interface Message {
   role: 'user' | 'assistant'
@@ -20,13 +38,22 @@ function App() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [model, setModel] = useState('llama-3.1-8b-instant')
+  const [model, setModel] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const sessionRef = useRef<string>(loadSessionId())
+  const abortRef = useRef<AbortController | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [])
+
+  useEffect(() => {
+    fetch(`${API_BASE}/health`)
+      .then((r) => r.json())
+      .then((d) => d.model && setModel(d.model))
+      .catch(() => setError(`Cannot reach the backend at ${API_BASE}. Is it running?`))
   }, [])
 
   useEffect(() => {
@@ -48,37 +75,71 @@ function App() {
 
     setError(null)
     setInput('')
-    setMessages((prev) => [...prev, { role: 'user', content: trimmed }])
+    // user bubble + an empty assistant bubble that fills in as tokens arrive
+    setMessages((prev) => [...prev, { role: 'user', content: trimmed }, { role: 'assistant', content: '' }])
     setLoading(true)
     setSidebarOpen(false)
 
-    try {
-      const res = await fetch(`${API_BASE}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: trimmed }),
+    const controller = new AbortController()
+    abortRef.current = controller
+    const appendToLast = (token: string) =>
+      setMessages((prev) => {
+        const copy = prev.slice()
+        const last = copy[copy.length - 1]
+        copy[copy.length - 1] = { ...last, content: last.content + token }
+        return copy
+      })
+    // On failure drop the empty assistant bubble (and the user bubble if nothing came back).
+    const dropEmptyReply = () =>
+      setMessages((prev) => {
+        const last = prev[prev.length - 1]
+        if (last?.role === 'assistant' && last.content === '') return prev.slice(0, -1)
+        return prev
       })
 
-      if (!res.ok) {
+    try {
+      const res = await fetch(`${API_BASE}/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: trimmed, session_id: sessionRef.current }),
+        signal: controller.signal,
+      })
+
+      if (!res.ok || !res.body) {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.detail || `Request failed (${res.status})`)
       }
 
-      const data = await res.json()
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: data.reply },
-      ])
-      if (data.model) setModel(data.model)
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const events = buffer.split('\n\n')
+        buffer = events.pop() ?? ''
+        for (const evt of events) {
+          if (!evt.startsWith('data: ')) continue
+          const data = JSON.parse(evt.slice(6))
+          if (data.error) throw new Error(data.error)
+          if (data.token) appendToLast(data.token)
+          if (data.model) setModel(data.model)
+        }
+      }
     } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : 'Failed to reach the server. Is the backend running?'
-      setError(msg)
-      // remove the optimistic user message on hard failure? keep it
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      setError(
+        err instanceof TypeError
+          ? `Failed to reach the backend at ${API_BASE}. Is it running?`
+          : err instanceof Error
+            ? err.message
+            : 'Something went wrong',
+      )
+      dropEmptyReply()
     } finally {
       setLoading(false)
+      abortRef.current = null
       textareaRef.current?.focus()
     }
   }
@@ -96,8 +157,11 @@ function App() {
   }
 
   const clearHistory = async () => {
+    abortRef.current?.abort()
     try {
-      await fetch(`${API_BASE}/history`, { method: 'DELETE' })
+      await fetch(`${API_BASE}/history?session_id=${encodeURIComponent(sessionRef.current)}`, {
+        method: 'DELETE',
+      })
       setMessages([])
       setError(null)
     } catch {
@@ -172,7 +236,7 @@ function App() {
                 <line x1="3" y1="18" x2="21" y2="18" />
               </svg>
             </button>
-            <h1>ChatGPT Clone</h1>
+            <h1>Personal AI Assistant</h1>
           </div>
           <span className="model-badge">{model}</span>
         </header>
@@ -199,7 +263,7 @@ function App() {
             </div>
           ) : (
             <div className="messages-inner">
-              {messages.map((m, i) => (
+              {messages.filter((m) => m.role === 'user' || m.content !== '').map((m, i) => (
                 <div key={i} className={`message ${m.role}`}>
                   <div className="message-avatar">
                     {m.role === 'user' ? 'U' : 'AI'}
@@ -207,7 +271,7 @@ function App() {
                   <div className="message-content">{m.content}</div>
                 </div>
               ))}
-              {loading && (
+              {loading && messages[messages.length - 1]?.content === '' && (
                 <div className="message assistant">
                   <div className="message-avatar">AI</div>
                   <div className="message-content">
@@ -230,7 +294,7 @@ function App() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Message ChatGPT Clone…"
+                placeholder="Message the assistant…"
                 rows={1}
                 disabled={loading}
               />
